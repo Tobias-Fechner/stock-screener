@@ -1,5 +1,7 @@
 import datetime
 import logging
+import pandas as pd
+import numpy as np
 from yahoo_fin import stock_info as si
 
 #To make logging in notebook visible
@@ -23,18 +25,18 @@ def getSP500(years=20):
 
         stock = Stock(ticker)
 
+        #scrape data from yahoo finance using yahoo_fin's get_data
         try:
-            historicalPrice = Historical(data=si.get_data(ticker=ticker, start_date=startDate, end_date=endDate, index_as_date=True, interval="1wk"),
-                                         duration=years)
-            stock.historicalPrice = historicalPrice
+            stock.historicalPrice = si.get_data(ticker=ticker, start_date=startDate, end_date=endDate, index_as_date=True, interval="1wk")
             logger.info("%s", ticker)
-
         except KeyError:
-            logger.warning("KeyError for %s in function ", ticker)
+            logger.warning("KeyError for %s", ticker)
             continue
-
         except AssertionError:
             logger.warning("AssertionError for %s", ticker)
+            continue
+
+        stock.generateSMA()
 
         stocks[ticker] = stock
 
@@ -45,27 +47,50 @@ class Stock:
     def __init__(self, name):
         self.name = name
         self.historicalPrice = None
+        self.fiftyTwoHigh = None
+        self.fiftyTwoLow = None
 
-    def fiftyTwoLow(self):
-        assert isinstance(self.historicalPrice, Historical)
+    #52 week high
+    def generate52High(self):
         try:
-            df = self.historicalPrice.data.iloc[-52:]
-            return min(df['low'])
+            assert isinstance(self.historicalPrice, pd.DataFrame)
+            df = self.historicalPrice.iloc[-52:]
+            self.fiftyTwoHigh = max(df['high'])
 
         except AttributeError:
-            logger.warning("Could not generate 52 week low for %s as there was no historical price data.", self.name)
+            logger.warning("Attribute error generating 52wk high. Check for empty dataframe in %s.", self.name)
 
-    def fiftyTwoHigh(self):
-        assert isinstance(self.historicalPrice, Historical)
+        except AssertionError:
+            logger.warning("Assertion error generating 52wk high for %s", self.name)
+
+    #52 week low
+    def generate52Low(self):
         try:
-            df = self.historicalPrice.data.iloc[-52:]
-            return max(df['high'])
+            assert isinstance(self.historicalPrice, pd.DataFrame)
+            df = self.historicalPrice.iloc[-52:]
+            self.fiftyTwoLow = min(df['low'])
 
         except AttributeError:
-            logger.warning("Could not generate 52 week high for %s as there was no historical price data.", self.name)
+            logger.warning("Attribute error generating 52wk low. Check for empty dataframe in %s.", self.name)
 
-class Historical:
-    def __init__(self, data, duration):
-        self.dateSourced = datetime.datetime.today().strftime("%d/%m/%Y")
-        self.duration = str(duration) + " yrs"
-        self.data = data
+        except AssertionError:
+            logger.warning("Assertion error generating 52wk low for %s", self.name)
+
+    #Simple moving average, default 10 week/ 50 day
+    #TODO: Account for change in sample rate. This assumes historical price data has weekly sampling.
+    def generateSMA(self, windows=[10,30,40]):
+        try:
+            assert isinstance(self.historicalPrice, pd.DataFrame)
+            for window in windows:
+                #Convert weeks to days
+                days = window*5
+                #Calculate simple moving average
+                self.historicalPrice["SMA" + str(days)] = self.historicalPrice['close'].rolling(window=window).mean()
+
+        except AssertionError:
+            logger.warning("Assertion error generating SMA for %s", self.name)
+
+        except TypeError:
+            if type(windows) is int:
+                print("Must specify list of weeks/ windows, even if one item.")
+                raise
