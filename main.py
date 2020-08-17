@@ -15,11 +15,28 @@ def getDurationDates(years):
     today = datetime.date.today()
     return today.replace(year=today.year-years), today
 
+def getTickers(tickerGroups=['sp500']):
 
-def getSP500(years=20):
+    funcsMapping = {'sp500': si.tickers_sp500,
+                    'dow': si.tickers_dow,
+                    'nasdaq': si.tickers_nasdaq,
+                    'other': si.tickers_other}
+
+    tickers = []
+
+    for tickerGroup in tickerGroups:
+        try:
+            func = funcsMapping[tickerGroup]
+            tickers.extend(func())
+        except KeyError:
+            logger.warning("No funuction mapping for ticker group %s.", tickerGroup)
+
+    return sorted(set(tickers))
+
+def getHistoricalPrice(tickers, years=20):
 
     startDate, endDate = getDurationDates(years)
-    stocks = dict.fromkeys(si.tickers_sp500())
+    stocks = dict.fromkeys(tickers)
 
     for ticker in stocks.keys():
 
