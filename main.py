@@ -58,6 +58,7 @@ class Stock:
         self.ticker = ticker
         self.price = None
         self.financials = {}
+        self.stats = None
 
     def getHistoricalPrice(self, years):
         #scrape price data from yahoo finance using yahoo_fin's get_data
@@ -105,7 +106,13 @@ class Stock:
             pass
 
     def generateDerivedFinancials(self, season='most-recent'):
-        self.financials[season].generateDerivedFinancials()
+        if not isinstance(self.stats, pd.DataFrame):
+            self.getStatistics()
+
+        self.financials[season].generateDerivedFinancials(self.stats)
+
+    def getStatistics(self):
+        self.stats = si.get_stats(self.ticker).set_index('Attribute')
 
 class Price:
     def __init__(self):
@@ -170,9 +177,22 @@ class Financial:
         self.incomeStatement = None
         self.cashFlow = None
 
-    def generateDerivedFinancials(self):
+    def generateDerivedFinancials(self, stats):
+        assert isinstance(stats, pd.DataFrame)
+
         self.__calculateBookValue()
         self.__calculateEPS()
+        self.__calculateSPS(stats.loc['Shares Outstanding 5'].values[0])
+
+    @staticmethod
+    def __calculateGrowthRate(df, columnName):
+
+        growthRateName = columnName + 'GrowthRate'
+
+        # Necessary to reverse year ordering as there is no override argument available in pct_change()
+        df = df[list(sorted(df.columns))]
+        df.loc[growthRateName] = df.loc[columnName].pct_change()
+        return df[list(reversed(df.columns))]
 
     def __calculateBookValue(self):
         """
@@ -183,15 +203,12 @@ class Financial:
         assert isinstance(self.balanceSheet, pd.DataFrame)
 
         self.balanceSheet.loc['bookValue'] = self.balanceSheet.loc['totalAssets'] - \
-                                     self.balanceSheet.loc['totalLiab'] - \
-                                     self.balanceSheet.loc['intangibleAssets'] - \
-                                     self.balanceSheet.loc['goodWill']
+                                             self.balanceSheet.loc['totalLiab'] - \
+                                             self.balanceSheet.loc['intangibleAssets'] - \
+                                             self.balanceSheet.loc['goodWill']
 
-        #necessary to reverse year ordering as there is no override arg available in pct_change()
-        self.balanceSheet = self.balanceSheet[list(sorted(self.balanceSheet.columns))]
-        self.balanceSheet.loc['bookValueGrowthRate'] = self.balanceSheet.loc['bookValue'].pct_change()
-        self.balanceSheet = self.balanceSheet[list(reversed(self.balanceSheet.columns))]
-        logger.info("Success calculating book value and growth rate.")
+        self.balanceSheet = self.__calculateGrowthRate(self.balanceSheet, 'bookValue')
+        logger.info("Success calculating book value and growth rate for %s.", self.ticker)
 
     def __calculateEPS(self):
         """
@@ -201,13 +218,35 @@ class Financial:
         """
         self.incomeStatement.loc['earningsPerShare'] = self.incomeStatement.loc['netIncome'] / self.balanceSheet.loc['commonStock']
 
-        self.incomeStatement = self.incomeStatement[list(sorted(self.incomeStatement.columns))]
-        self.incomeStatement.loc['earningsPerShareGrowthRate'] = self.incomeStatement.loc['earningsPerShare'].pct_change()
-        self.incomeStatement = self.incomeStatement[list(reversed(self.incomeStatement.columns))]
-        logger.info("Success calculating earnings per share and growth rate.")
+        self.incomeStatement = self.__calculateGrowthRate(self.incomeStatement, 'earningsPerShare')
+        logger.info("Success calculating earnings per share (EPS) and growth rate for %s.", self.ticker)
 
-    def __calculateSPS(self):
+    def __calculateSPS(self, sharesOutstanding):
         """
+        Sales per share is a ratio that computes the total revenue earned per share over a designated period,
+        whether quarterly, semi-annually, annually, or trailing twelve months (TTM).
+        It is calculated by dividing total revenue by average total shares outstanding.
+        It is also known as "revenue per share."
 
+
+        WARNING: Weakness in current approach. We are using a single value for shares outstanding over the entire period.
+                 Should try and source historical shares outstanding data and use average, for example. (!!)
         :return:
         """
+
+        if not isinstance(sharesOutstanding, int) or not isinstance(sharesOutstanding, float):
+            if 'M' in sharesOutstanding:
+                shares = float(sharesOutstanding[:-1]) * 1000000
+            elif 'B' in sharesOutstanding:
+                shares = float(sharesOutstanding[:-1]) * 1000000000
+            else:
+                raise TypeError
+        else:
+            shares = sharesOutstanding
+
+        self.incomeStatement.loc['salesPerShare'] = self.incomeStatement.loc['totalRevenue'] / shares
+
+        self.incomeStatement = self.__calculateGrowthRate(self.incomeStatement, 'salesPerShare')
+        logger.info("Success calculating sales per share (SPS) and growth rate for %s.", self.ticker)
+
+
