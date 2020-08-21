@@ -1,8 +1,8 @@
 import datetime
 import logging
-from abc import ABC, abstractmethod
 import pandas as pd
 from yahoo_fin import stock_info as si
+import plotly.graph_objects as go
 
 #To make logging in notebook visible
 logger = logging.getLogger('root')
@@ -52,6 +52,29 @@ def getStockFromAllTickers(tickers, years=20):
         stocks[ticker] = stock
 
     return stocks
+
+def get4GrowthRatesFigure(stock, season='most-recent'):
+    assert isinstance(stock, Stock)
+    if not isinstance(stock.financials[season], Financial):
+        logger.error("Missing financial data. Make sure to run stock.generateDerivedFinancials() first.")
+        raise TypeError
+
+    df = pd.DataFrame(data=[stock.financials[season].balanceSheet.loc['bookValueGrowthRate'],
+                            stock.financials[season].incomeStatement.loc['earningsPerShareGrowthRate'],
+                            stock.financials[season].incomeStatement.loc['salesPerShareGrowthRate'],
+                            stock.financials[season].cashFlow.loc['operatingCashFlowGrowthRate']])
+
+    traces = []
+
+    for growthRate in df.index:
+        trace = go.Scatter(x=df.columns,
+                           y=df.loc[growthRate],
+                           mode='lines',
+                           name=growthRate)
+
+        traces.append(trace)
+
+    return go.Figure(data=traces)
 
 class Stock:
     def __init__(self, ticker):
@@ -183,9 +206,17 @@ class Financial:
         self.__calculateBookValue()
         self.__calculateEPS()
         self.__calculateSPS(stats.loc['Shares Outstanding 5'].values[0])
+        self.__calculateOperatingCashGrowthRate()
 
     @staticmethod
     def __calculateGrowthRate(df, columnName):
+        """
+        Function handles swapping of columns (years) to account for the fact that the method pct_change()
+        calculates it in one direction only. Otherwise all growth rates would be the wrong way round.
+        :param df: financial document data table e.g. balance sheet or income statement
+        :param columnName: name to calculate growth rate on
+        :return: data table with growth rate row added. (row name generated within function
+        """
 
         growthRateName = columnName + 'GrowthRate'
 
@@ -249,4 +280,9 @@ class Financial:
         self.incomeStatement = self.__calculateGrowthRate(self.incomeStatement, 'salesPerShare')
         logger.info("Success calculating sales per share (SPS) and growth rate for %s.", self.ticker)
 
+    def __calculateOperatingCashGrowthRate(self):
 
+        self.cashFlow = self.__calculateGrowthRate(self.cashFlow, 'totalCashFromOperatingActivities')
+
+        # Rename to shorter name
+        self.cashFlow.index.values[-1] = 'operatingCashFlowGrowthRate'
