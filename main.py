@@ -1,8 +1,8 @@
 import datetime
 import logging
 import pandas as pd
-import numpy as np
 from yahoo_fin import stock_info as si
+import plotly.graph_objects as go
 
 #To make logging in notebook visible
 logger = logging.getLogger('root')
@@ -10,12 +10,15 @@ FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
 logger.setLevel(logging.DEBUG)
 
-def getDurationDates(years):
+def _getDurationDates(years):
 
     today = datetime.date.today()
     return today.replace(year=today.year-years), today
 
-def getTickers(tickerGroups=['sp500']):
+def getTickers(tickerGroups=None):
+
+    if tickerGroups is None:
+        tickerGroups = ['sp500']
 
     funcsMapping = {'sp500': si.tickers_sp500,
                     'dow': si.tickers_dow,
@@ -29,85 +32,257 @@ def getTickers(tickerGroups=['sp500']):
             func = funcsMapping[tickerGroup]
             tickers.extend(func())
         except KeyError:
-            logger.warning("No funuction mapping for ticker group %s.", tickerGroup)
+            logger.warning("No function mapping for ticker group %s.", tickerGroup)
 
     return sorted(set(tickers))
 
-def getHistoricalPrice(tickers, years=20):
+def getStockFromTicker(ticker, years=20):
 
-    startDate, endDate = getDurationDates(years)
+    stock = Stock(ticker)
+    stock.getHistoricalPrice(years)
+    stock.getFinancials()
+    return stock
+
+def getStockFromAllTickers(tickers, years=20):
     stocks = dict.fromkeys(tickers)
 
     for ticker in stocks.keys():
 
-        stock = Stock(ticker)
-
-        #scrape data from yahoo finance using yahoo_fin's get_data
-        try:
-            stock.historicalPrice = si.get_data(ticker=ticker, start_date=startDate, end_date=endDate, index_as_date=True, interval="1wk")
-            logger.info("%s", ticker)
-        except KeyError:
-            logger.warning("KeyError for %s", ticker)
-            continue
-        except AssertionError:
-            logger.warning("AssertionError for %s", ticker)
-            continue
-
-        stock.generateSMA()
-
+        stock = getStockFromTicker(ticker, years)
         stocks[ticker] = stock
 
     return stocks
 
+def get4GrowthRatesFigure(stock, season='most-recent'):
+    assert isinstance(stock, Stock)
+    if not isinstance(stock.financials[season], Financial):
+        logger.error("Missing financial data. Make sure to run stock.generateDerivedFinancials() first.")
+        raise TypeError
+
+    df = pd.DataFrame(data=[stock.financials[season].balanceSheet.loc['bookValueGrowthRate'],
+                            stock.financials[season].incomeStatement.loc['earningsPerShareGrowthRate'],
+                            stock.financials[season].incomeStatement.loc['salesPerShareGrowthRate'],
+                            stock.financials[season].cashFlow.loc['operatingCashFlowGrowthRate']])
+
+    traces = []
+
+    for growthRate in df.index:
+        trace = go.Scatter(x=df.columns,
+                           y=df.loc[growthRate],
+                           mode='lines',
+                           name=growthRate)
+
+        traces.append(trace)
+
+    return go.Figure(data=traces)
 
 class Stock:
-    def __init__(self, name):
-        self.name = name
-        self.historicalPrice = None
+    def __init__(self, ticker):
+        self.ticker = ticker
+        self.price = None
+        self.financials = {}
+        self.stats = None
+
+    def getHistoricalPrice(self, years):
+        #scrape price data from yahoo finance using yahoo_fin's get_data
+        try:
+            assert isinstance(self.ticker, str)
+
+            startDate, endDate = _getDurationDates(years)
+
+            self.price = Price()
+            self.price.historical = si.get_data(ticker=self.ticker,
+                                                      start_date=startDate,
+                                                      end_date=endDate,
+                                                      index_as_date=True,
+                                                      interval="1wk")
+            logger.info("Success getting historical price for %s", self.ticker)
+
+        except KeyError:
+            logger.warning("KeyError getting historical price for %s", self.ticker)
+            pass
+
+        except AssertionError:
+            logger.warning("AssertionError getting historical price for %s", self.ticker)
+            pass
+
+    def getFinancials(self, season='most-recent', yearly=True):
+
+        #scrape data from 3 financial statements using yahoo_fin's get_financials
+        try:
+            assert isinstance(self.ticker, str)
+            data = si.get_financials(ticker=self.ticker, yearly=yearly, quarterly=False)
+            logger.info("Success getting financials for %s", self.ticker)
+
+            #store balance sheet data
+            self.financials[season] = Financial(self.ticker)
+            self.financials[season].balanceSheet = data['yearly_balance_sheet']
+            self.financials[season].incomeStatement = data['yearly_income_statement']
+            self.financials[season].cashFlow = data['yearly_cash_flow']
+
+        except KeyError:
+            logger.warning("KeyError getting financials for %s", self.ticker)
+            pass
+
+        except AssertionError:
+            logger.warning("AssertionError getting financials for %s", self.ticker)
+            pass
+
+    def generateDerivedFinancials(self, season='most-recent'):
+        if not isinstance(self.stats, pd.DataFrame):
+            self.getStatistics()
+
+        self.financials[season].generateDerivedFinancials(self.stats)
+
+    def getStatistics(self):
+        self.stats = si.get_stats(self.ticker).set_index('Attribute')
+
+class Price:
+    def __init__(self):
+        self.today = None
+        self.historical = None
         self.fiftyTwoHigh = None
         self.fiftyTwoLow = None
 
-    #52 week high
     def generate52High(self):
         try:
-            assert isinstance(self.historicalPrice, pd.DataFrame)
-            df = self.historicalPrice.iloc[-52:]
+            assert isinstance(self.historical, pd.DataFrame)
+            df = self.historical.iloc[-52:]
             self.fiftyTwoHigh = max(df['high'])
 
         except AttributeError:
-            logger.warning("Attribute error generating 52wk high. Check for empty dataframe in %s.", self.name)
+            logger.warning("Attribute error generating 52wk high. Check for empty historical price data.")
 
         except AssertionError:
-            logger.warning("Assertion error generating 52wk high for %s", self.name)
+            logger.warning("Assertion error generating 52wk high.")
 
-    #52 week low
     def generate52Low(self):
         try:
-            assert isinstance(self.historicalPrice, pd.DataFrame)
-            df = self.historicalPrice.iloc[-52:]
+            assert isinstance(self.historical, pd.DataFrame)
+            df = self.historical.iloc[-52:]
             self.fiftyTwoLow = min(df['low'])
 
         except AttributeError:
-            logger.warning("Attribute error generating 52wk low. Check for empty dataframe in %s.", self.name)
+            logger.warning("Attribute error generating 52wk low. Check for empty historical price data.")
 
         except AssertionError:
-            logger.warning("Assertion error generating 52wk low for %s", self.name)
+            logger.warning("Assertion error generating 52wk low.")
 
-    #Simple moving average, default 10 week/ 50 day
-    #TODO: Account for change in sample rate. This assumes historical price data has weekly sampling.
-    def generateSMA(self, windows=[10,30,40]):
+    def generateSMA(self, windows=(10, 30, 40)):
+        # Simple moving average, default 10 week/ 50 day
         try:
-            assert isinstance(self.historicalPrice, pd.DataFrame)
+            assert isinstance(self.historical, pd.DataFrame)
             for window in windows:
-                #Convert weeks to days
-                days = window*5
-                #Calculate simple moving average
-                self.historicalPrice["SMA" + str(days)] = self.historicalPrice['close'].rolling(window=window).mean()
+                # Convert weeks to days
+                days = window * 5
+                # Calculate simple moving average
+                self.historical["SMA" + str(days)] = self.historical['close'].rolling(
+                    window=window).mean()
 
         except AssertionError:
-            logger.warning("Assertion error generating SMA for %s", self.name)
+            logger.warning("No historical price data.")
 
         except TypeError:
             if type(windows) is int:
                 print("Must specify list of weeks/ windows, even if one item.")
                 raise
+            else:
+                print("TypeError generating SMA.")
+                raise
+
+class Financial:
+    def __init__(self, ticker):
+        self.ticker = ticker
+        self.year = None
+        self.filing = None
+        self.quarter = None
+        self.balanceSheet = None
+        self.incomeStatement = None
+        self.cashFlow = None
+
+    def generateDerivedFinancials(self, stats):
+        assert isinstance(stats, pd.DataFrame)
+
+        self.__calculateBookValue()
+        self.__calculateEPS()
+        self.__calculateSPS(stats.loc['Shares Outstanding 5'].values[0])
+        self.__calculateOperatingCashGrowthRate()
+
+    @staticmethod
+    def __calculateGrowthRate(df, columnName):
+        """
+        Function handles swapping of columns (years) to account for the fact that the method pct_change()
+        calculates it in one direction only. Otherwise all growth rates would be the wrong way round.
+        :param df: financial document data table e.g. balance sheet or income statement
+        :param columnName: name to calculate growth rate on
+        :return: data table with growth rate row added. (row name generated within function
+        """
+
+        growthRateName = columnName + 'GrowthRate'
+
+        # Necessary to reverse year ordering as there is no override argument available in pct_change()
+        df = df[list(sorted(df.columns))]
+        df.loc[growthRateName] = df.loc[columnName].pct_change()
+        return df[list(reversed(df.columns))]
+
+    def __calculateBookValue(self):
+        """
+        Book value can also be thought of as the net asset value of a company calculated as total assets minus
+        intangible assets (patents, goodwill) and liabilities.
+        :return:
+        """
+        assert isinstance(self.balanceSheet, pd.DataFrame)
+
+        self.balanceSheet.loc['bookValue'] = self.balanceSheet.loc['totalAssets'] - \
+                                             self.balanceSheet.loc['totalLiab'] - \
+                                             self.balanceSheet.loc['intangibleAssets'] - \
+                                             self.balanceSheet.loc['goodWill']
+
+        self.balanceSheet = self.__calculateGrowthRate(self.balanceSheet, 'bookValue')
+        logger.info("Success calculating book value and growth rate for %s.", self.ticker)
+
+    def __calculateEPS(self):
+        """
+        Earnings per share (EPS) is calculated as a company's profit divided by the outstanding shares of
+        its common stock. The resulting number serves as an indicator of a company's profitability.
+        :return:
+        """
+        self.incomeStatement.loc['earningsPerShare'] = self.incomeStatement.loc['netIncome'] / self.balanceSheet.loc['commonStock']
+
+        self.incomeStatement = self.__calculateGrowthRate(self.incomeStatement, 'earningsPerShare')
+        logger.info("Success calculating earnings per share (EPS) and growth rate for %s.", self.ticker)
+
+    def __calculateSPS(self, sharesOutstanding):
+        """
+        Sales per share is a ratio that computes the total revenue earned per share over a designated period,
+        whether quarterly, semi-annually, annually, or trailing twelve months (TTM).
+        It is calculated by dividing total revenue by average total shares outstanding.
+        It is also known as "revenue per share."
+
+
+        WARNING: Weakness in current approach. We are using a single value for shares outstanding over the entire period.
+                 Should try and source historical shares outstanding data and use average, for example. (!!)
+        :return:
+        """
+
+        if not isinstance(sharesOutstanding, int) or not isinstance(sharesOutstanding, float):
+            if 'M' in sharesOutstanding:
+                shares = float(sharesOutstanding[:-1]) * 1000000
+            elif 'B' in sharesOutstanding:
+                shares = float(sharesOutstanding[:-1]) * 1000000000
+            else:
+                raise TypeError
+        else:
+            shares = sharesOutstanding
+
+        self.incomeStatement.loc['salesPerShare'] = self.incomeStatement.loc['totalRevenue'] / shares
+
+        self.incomeStatement = self.__calculateGrowthRate(self.incomeStatement, 'salesPerShare')
+        logger.info("Success calculating sales per share (SPS) and growth rate for %s.", self.ticker)
+
+    def __calculateOperatingCashGrowthRate(self):
+
+        self.cashFlow = self.__calculateGrowthRate(self.cashFlow, 'totalCashFromOperatingActivities')
+
+        # Rename to shorter name
+        self.cashFlow.index.values[-1] = 'operatingCashFlowGrowthRate'
